@@ -1,1 +1,191 @@
-dada
+import time
+import threading
+import discord
+from discord.ext import commands
+from playwright.sync_api import sync_playwright
+
+# =========================
+# CONFIG
+# =========================
+
+DEFAULT_URL = "TASK PAGE URL"
+
+DISCORD_BOT_TOKEN = "DISCORD BOT TOKEN"
+DISCORD_CHANNEL_ID = "CHANNEL ID"
+
+CHECK_EVERY_SECONDS = 15
+
+# =========================
+# GLOBAL STATE
+# =========================
+
+current_url = DEFAULT_URL
+watching_enabled = True
+status_message = "Starting up..."
+last_check_time = "Not checked yet"
+task_available_now = False
+already_alerted = False
+
+# =========================
+# DISCORD BOT SETUP
+# =========================
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+def watch_tasks():
+    global status_message
+    global last_check_time
+    global task_available_now
+    global already_alerted
+    global current_url
+    global watching_enabled
+    global CHECK_EVERY_SECONDS
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        page = browser.new_page()
+
+        try:
+            page.goto(current_url, wait_until="commit", timeout=60000)
+            page.wait_for_timeout(5000)
+        except Exception as e:
+            print("Initial load error:", e)
+
+        input("Log into the platform, open the task page, then press Enter here...")
+
+        status_message = "Watching tasks ✅"
+
+        while True:
+            try:
+                if not watching_enabled:
+                    status_message = "Paused ⏸️"
+                    time.sleep(5)
+                    continue
+
+                status_message = "Watching tasks ✅"
+
+                page.goto(current_url, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(5000)
+
+                text = page.locator("body").inner_text().lower()
+
+                no_results = "no results" in text
+
+                task_words = [
+                    "start task",
+                    "claim task",
+                    "open task",
+                    "begin task",
+                    "accept task"
+                ]
+
+                task_available = any(word in text for word in task_words)
+
+                task_available_now = task_available and not no_results
+                last_check_time = time.strftime("%H:%M:%S")
+
+                print("No results:", no_results, "| Task available:", task_available_now)
+
+                channel = bot.get_channel(DISCORD_CHANNEL_ID)
+
+                if task_available_now:
+                    if not already_alerted:
+                        if channel:
+                            bot.loop.create_task(
+                                channel.send(
+                                    "🚨 A task may be available. Check the platform now."
+                                )
+                            )
+                        print("Task alert sent!")
+                        already_alerted = True
+                else:
+                    already_alerted = False
+                    print("No tasks yet.")
+
+            except Exception as e:
+                status_message = f"Error: {e}"
+                last_check_time = time.strftime("%H:%M:%S")
+                print("Error:", e)
+
+            time.sleep(CHECK_EVERY_SECONDS)
+
+
+@bot.event
+async def on_ready():
+    print(f"Bot logged in as {bot.user}")
+
+    channel = bot.get_channel(DISCORD_CHANNEL_ID)
+    if channel:
+        await channel.send("🟢 Task watcher bot is online.")
+
+    thread = threading.Thread(target=watch_tasks, daemon=True)
+    thread.start()
+
+
+@bot.command()
+async def status(ctx):
+    await ctx.send(
+        f"✅ **Status:** {status_message}\n"
+        f"🕒 **Last check:** {last_check_time}\n"
+        f"📌 **Task available:** {task_available_now}\n"
+        f"🌐 **Current URL:** {current_url}\n"
+        f"⏱️ **Interval:** {CHECK_EVERY_SECONDS} seconds\n"
+        f"▶️ **Watching enabled:** {watching_enabled}"
+    )
+
+
+@bot.command()
+async def url(ctx, new_url):
+    global current_url
+    global already_alerted
+
+    current_url = new_url
+    already_alerted = False
+
+    await ctx.send(f"✅ Updated task URL:\n{current_url}")
+
+
+@bot.command()
+async def pause(ctx):
+    global watching_enabled
+    watching_enabled = False
+    await ctx.send("⏸️ Watcher paused.")
+
+
+@bot.command()
+async def resume(ctx):
+    global watching_enabled
+    watching_enabled = True
+    await ctx.send("▶️ Watcher resumed.")
+
+
+@bot.command()
+async def interval(ctx, seconds: int):
+    global CHECK_EVERY_SECONDS
+
+    if seconds < 3:
+        await ctx.send("❌ Interval too low. Use at least 3 seconds.")
+        return
+
+    CHECK_EVERY_SECONDS = seconds
+    await ctx.send(f"✅ Check interval updated to {CHECK_EVERY_SECONDS} seconds.")
+
+
+@bot.command()
+async def commands_list(ctx):
+    await ctx.send(
+        "**Commands:**\n"
+        "`!status` - check if watcher is running\n"
+        "`!url <new_url>` - update monitored URL\n"
+        "`!pause` - pause watching\n"
+        "`!resume` - resume watching\n"
+        "`!interval <seconds>` - change check speed\n"
+        "`!commands_list` - show commands"
+    )
+
+
+bot.run(DISCORD_BOT_TOKEN)
